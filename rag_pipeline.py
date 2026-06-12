@@ -1,5 +1,5 @@
 """
-RAG Pipeline — LangChain + ChromaDB + HuggingFace Embeddings
+RAG Pipeline — LangChain + FAISS + HuggingFace Embeddings
 Supports conversational Q&A over HR policy documents.
 """
 
@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import List, Tuple
 
 from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
+from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
 from langchain_groq import ChatGroq
 from langchain.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
@@ -24,9 +24,9 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # ---- Paths ---------------------------------------------------------------
-BASE_DIR    = Path(__file__).resolve().parent
-DATA_PATH   = str(BASE_DIR / "data")
-CHROMA_PATH = str(BASE_DIR / "chroma_db")
+BASE_DIR   = Path(__file__).resolve().parent
+DATA_PATH  = str(BASE_DIR / "data")
+FAISS_PATH = str(BASE_DIR / "faiss_index")
 
 # ---- Embedding model -----------------------------------------------------
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
@@ -36,7 +36,7 @@ class RAGPipeline:
     """
     Full RAG pipeline:
       1. Load & chunk HR policy documents
-      2. Embed with all-MiniLM-L6-v2 → store in ChromaDB
+      2. Embed with all-MiniLM-L6-v2 → store in FAISS
       3. history-aware retriever  →  answer chain
     """
 
@@ -48,7 +48,7 @@ class RAGPipeline:
             encode_kwargs={"normalize_embeddings": True},
         )
         self.vectorstore = None
-        self.rag_chain    = None
+        self.rag_chain   = None
         self._initialise()
 
     # ------------------------------------------------------------------ #
@@ -57,19 +57,19 @@ class RAGPipeline:
 
     def _initialise(self):
         """Load or build the vector store, then wire up the chain."""
-        chroma_exists = (
-            os.path.isdir(CHROMA_PATH)
-            and any(Path(CHROMA_PATH).iterdir())
+        faiss_exists = (
+            os.path.isdir(FAISS_PATH)
+            and os.path.exists(os.path.join(FAISS_PATH, "index.faiss"))
         )
-        if chroma_exists:
-            logger.info("Loading existing ChromaDB from %s", CHROMA_PATH)
-            self.vectorstore = Chroma(
-                persist_directory=CHROMA_PATH,
-                embedding_function=self.embeddings,
-                collection_name="hr_policies",
+        if faiss_exists:
+            logger.info("Loading existing FAISS index from %s", FAISS_PATH)
+            self.vectorstore = FAISS.load_local(
+                FAISS_PATH,
+                self.embeddings,
+                allow_dangerous_deserialization=True,
             )
         else:
-            logger.info("No ChromaDB found — ingesting documents …")
+            logger.info("No FAISS index found — ingesting documents …")
             self.ingest_documents()
 
         self._build_chain()
@@ -81,7 +81,7 @@ class RAGPipeline:
     def ingest_documents(self) -> int:
         """
         Load all .pdf files from DATA_PATH, chunk them, embed them,
-        and persist to ChromaDB. Returns the number of chunks stored.
+        and persist to FAISS. Returns the number of chunks stored.
         """
         logger.info("Loading documents from %s", DATA_PATH)
 
@@ -108,13 +108,10 @@ class RAGPipeline:
         chunks = splitter.split_documents(documents)
         logger.info("Created %d chunks.", len(chunks))
 
-        self.vectorstore = Chroma.from_documents(
-            documents=chunks,
-            embedding=self.embeddings,
-            persist_directory=CHROMA_PATH,
-            collection_name="hr_policies",
-        )
-        logger.info("ChromaDB persisted to %s", CHROMA_PATH)
+        self.vectorstore = FAISS.from_documents(chunks, self.embeddings)
+        os.makedirs(FAISS_PATH, exist_ok=True)
+        self.vectorstore.save_local(FAISS_PATH)
+        logger.info("FAISS index saved to %s", FAISS_PATH)
         return len(chunks)
 
     # ------------------------------------------------------------------ #
@@ -168,7 +165,7 @@ class RAGPipeline:
             ("human", "{input}"),
         ])
 
-        answer_chain  = create_stuff_documents_chain(llm, qa_prompt)
+        answer_chain   = create_stuff_documents_chain(llm, qa_prompt)
         self.rag_chain = create_retrieval_chain(
             history_aware_retriever, answer_chain
         )
@@ -208,5 +205,5 @@ class RAGPipeline:
 
     def get_collection_count(self) -> int:
         if self.vectorstore:
-            return self.vectorstore._collection.count()
+            return self.vectorstore.index.ntotal
         return 0

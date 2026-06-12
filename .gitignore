@@ -1,8 +1,8 @@
 # Secrets — never commit
-.streamlit/secrets.toml
 .env
 
-# ChromaDB is rebuilt on first run — no need to commit
+# Vector index — rebuilt on first run
+faiss_index/
 chroma_db/
 
 # Python
