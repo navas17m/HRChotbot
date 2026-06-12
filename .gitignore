@@ -1,0 +1,13 @@
+# Secrets — never commit
+.streamlit/secrets.toml
+.env
+
+# ChromaDB is rebuilt on first run — no need to commit
+chroma_db/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
