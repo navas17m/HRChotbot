@@ -1,5 +1,6 @@
 # Secrets — never commit
 .env
+.streamlit/secrets.toml
 
 # Vector index — rebuilt on first run
 faiss_index/
