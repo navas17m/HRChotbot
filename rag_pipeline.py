@@ -38,8 +38,10 @@ class RAGPipeline:
       3. Direct retriever + LLM call with chat history
     """
 
-    def __init__(self):
+    def __init__(self, groq_api_key: str = None, groq_model: str = None):
         logger.info("Initialising RAG Pipeline …")
+        self._groq_api_key = groq_api_key or os.getenv("GROQ_API_KEY", "")
+        self._groq_model   = groq_model   or os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
         self.embeddings = HuggingFaceEmbeddings(
             model_name=EMBEDDING_MODEL,
             model_kwargs={"device": "cpu"},
@@ -76,9 +78,9 @@ class RAGPipeline:
         )
 
         self.llm = ChatGroq(
-            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            model=self._groq_model,
             temperature=0.2,
-            groq_api_key=os.getenv("GROQ_API_KEY"),
+            groq_api_key=self._groq_api_key,
         )
 
         logger.info("RAG pipeline ready.")

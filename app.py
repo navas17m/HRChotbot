@@ -302,13 +302,9 @@ hr { border-color: rgba(255,255,255,0.08) !important; }
 
 @st.cache_resource(show_spinner="Loading HR Policy knowledge base…")
 def get_pipeline():
-    # Ensure secrets are in env at the moment the pipeline (and Groq client) initialises
-    try:
-        os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
-        os.environ["GROQ_MODEL"]   = st.secrets["GROQ_MODEL"]
-    except Exception:
-        pass
-    return RAGPipeline()
+    api_key = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
+    model   = st.secrets.get("GROQ_MODEL",   os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"))
+    return RAGPipeline(groq_api_key=api_key, groq_model=model)
 
 @st.cache_resource
 def get_history_manager():
