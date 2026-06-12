@@ -11,10 +11,11 @@ import time
 import streamlit as st
 
 # ---- Inject Groq secrets into env before pipeline imports ----------------
-if "GROQ_API_KEY" in st.secrets:
+try:
     os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
-if "GROQ_MODEL" in st.secrets:
-    os.environ["GROQ_MODEL"] = st.secrets["GROQ_MODEL"]
+    os.environ["GROQ_MODEL"]   = st.secrets["GROQ_MODEL"]
+except Exception:
+    pass  # fall back to .env / environment variables
 
 from rag_pipeline import RAGPipeline       # noqa: E402
 from chat_history import ChatHistoryManager  # noqa: E402
