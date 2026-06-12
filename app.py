@@ -10,15 +10,8 @@ import time
 
 import streamlit as st
 
-# ---- Inject Groq secrets into env before pipeline imports ----------------
-try:
-    os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
-    os.environ["GROQ_MODEL"]   = st.secrets["GROQ_MODEL"]
-except Exception:
-    pass  # fall back to .env / environment variables
-
-from rag_pipeline import RAGPipeline       # noqa: E402
-from chat_history import ChatHistoryManager  # noqa: E402
+from rag_pipeline import RAGPipeline
+from chat_history import ChatHistoryManager
 
 # ---- Configuration -------------------------------------------------------
 PAGE_TITLE = "HR Policy Assistant"
@@ -309,6 +302,12 @@ hr { border-color: rgba(255,255,255,0.08) !important; }
 
 @st.cache_resource(show_spinner="Loading HR Policy knowledge base…")
 def get_pipeline():
+    # Ensure secrets are in env at the moment the pipeline (and Groq client) initialises
+    try:
+        os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+        os.environ["GROQ_MODEL"]   = st.secrets["GROQ_MODEL"]
+    except Exception:
+        pass
     return RAGPipeline()
 
 @st.cache_resource
