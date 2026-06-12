@@ -1,6 +1,6 @@
 """
 RAG Pipeline — LangChain + FAISS + HuggingFace Embeddings
-Supports conversational Q&A over HR policy documents.
+Uses direct LCEL calls — no langchain.chains helpers required.
 """
 
 import os
@@ -13,10 +13,8 @@ from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
-from langchain.chains import create_history_aware_retriever, create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -37,7 +35,7 @@ class RAGPipeline:
     Full RAG pipeline:
       1. Load & chunk HR policy documents
       2. Embed with all-MiniLM-L6-v2 → store in FAISS
-      3. history-aware retriever  →  answer chain
+      3. Direct retriever + LLM call with chat history
     """
 
     def __init__(self):
@@ -48,7 +46,8 @@ class RAGPipeline:
             encode_kwargs={"normalize_embeddings": True},
         )
         self.vectorstore = None
-        self.rag_chain   = None
+        self.retriever   = None
+        self.llm         = None
         self._initialise()
 
     # ------------------------------------------------------------------ #
@@ -56,7 +55,6 @@ class RAGPipeline:
     # ------------------------------------------------------------------ #
 
     def _initialise(self):
-        """Load or build the vector store, then wire up the chain."""
         faiss_exists = (
             os.path.isdir(FAISS_PATH)
             and os.path.exists(os.path.join(FAISS_PATH, "index.faiss"))
@@ -72,17 +70,24 @@ class RAGPipeline:
             logger.info("No FAISS index found — ingesting documents …")
             self.ingest_documents()
 
-        self._build_chain()
+        self.retriever = self.vectorstore.as_retriever(
+            search_type="mmr",
+            search_kwargs={"k": 5, "fetch_k": 10},
+        )
+
+        self.llm = ChatGroq(
+            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            temperature=0.2,
+            groq_api_key=os.getenv("GROQ_API_KEY"),
+        )
+
+        logger.info("RAG pipeline ready.")
 
     # ------------------------------------------------------------------ #
     # Document Ingestion
     # ------------------------------------------------------------------ #
 
     def ingest_documents(self) -> int:
-        """
-        Load all .pdf files from DATA_PATH, chunk them, embed them,
-        and persist to FAISS. Returns the number of chunks stored.
-        """
         logger.info("Loading documents from %s", DATA_PATH)
 
         loader = DirectoryLoader(
@@ -115,64 +120,6 @@ class RAGPipeline:
         return len(chunks)
 
     # ------------------------------------------------------------------ #
-    # Chain Construction
-    # ------------------------------------------------------------------ #
-
-    def _build_chain(self):
-        """Build the history-aware retrieval + answer chain using LCEL."""
-        llm = ChatGroq(
-            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
-            temperature=0.2,
-            groq_api_key=os.getenv("GROQ_API_KEY"),
-        )
-
-        retriever = self.vectorstore.as_retriever(
-            search_type="mmr",
-            search_kwargs={"k": 5, "fetch_k": 10},
-        )
-
-        # --- Prompt 1: re-phrase the user question using chat history ---
-        contextualize_q_prompt = ChatPromptTemplate.from_messages([
-            ("system",
-             "Given the chat history and the latest user question, "
-             "rewrite the question to be fully self-contained. "
-             "Do NOT answer it — just rephrase it if needed. "
-             "If no rephrasing is needed, return it as-is."),
-            MessagesPlaceholder("chat_history"),
-            ("human", "{input}"),
-        ])
-
-        history_aware_retriever = create_history_aware_retriever(
-            llm, retriever, contextualize_q_prompt
-        )
-
-        # --- Prompt 2: answer using retrieved context --------------------
-        qa_system_prompt = (
-            "You are HRBot, a knowledgeable and friendly HR assistant for "
-            "Apex Technologies. Answer questions accurately based only on the "
-            "provided HR policy context. "
-            "If the answer is not in the context, say: "
-            "'I don't have specific information on that in our HR policies. "
-            "Please contact HR at hr@apextechnologies.com or call Ext. 1001.' "
-            "Keep answers concise, clear, and professional. "
-            "Format policy details as easy-to-read bullet points when helpful.\n\n"
-            "Context:\n{context}"
-        )
-
-        qa_prompt = ChatPromptTemplate.from_messages([
-            ("system", qa_system_prompt),
-            MessagesPlaceholder("chat_history"),
-            ("human", "{input}"),
-        ])
-
-        answer_chain   = create_stuff_documents_chain(llm, qa_prompt)
-        self.rag_chain = create_retrieval_chain(
-            history_aware_retriever, answer_chain
-        )
-
-        logger.info("RAG chain ready.")
-
-    # ------------------------------------------------------------------ #
     # Inference
     # ------------------------------------------------------------------ #
 
@@ -181,25 +128,39 @@ class RAGPipeline:
         query: str,
         chat_history: List[Tuple[str, str]],
     ) -> dict:
-        lc_history = []
-        for human, ai in chat_history:
-            lc_history.append(HumanMessage(content=human))
-            lc_history.append(AIMessage(content=ai))
+        # Step 1: retrieve relevant chunks
+        docs = self.retriever.invoke(query)
+        context = "\n\n".join(doc.page_content for doc in docs)
 
-        result = self.rag_chain.invoke({
-            "input": query,
-            "chat_history": lc_history,
+        # Step 2: build message list
+        system_prompt = (
+            "You are HRBot, a knowledgeable and friendly HR assistant for "
+            "Apex Technologies. Answer questions accurately based only on the "
+            "provided HR policy context. "
+            "If the answer is not in the context, say: "
+            "'I don't have specific information on that in our HR policies. "
+            "Please contact HR at hr@apextechnologies.com or call Ext. 1001.' "
+            "Keep answers concise, clear, and professional. "
+            "Format policy details as easy-to-read bullet points when helpful.\n\n"
+            f"Context:\n{context}"
+        )
+
+        messages = [SystemMessage(content=system_prompt)]
+        for human, ai in chat_history:
+            messages.append(HumanMessage(content=human))
+            messages.append(AIMessage(content=ai))
+        messages.append(HumanMessage(content=query))
+
+        # Step 3: call LLM
+        response = self.llm.invoke(messages)
+
+        sources = list({
+            Path(doc.metadata.get("source", "HR Policy Manual")).name
+            for doc in docs
         })
 
-        sources = []
-        if "context" in result:
-            sources = list({
-                Path(doc.metadata.get("source", "HR Policy Manual")).name
-                for doc in result["context"]
-            })
-
         return {
-            "answer":  result.get("answer", "I could not generate a response."),
+            "answer":  response.content,
             "sources": sources,
         }
 
